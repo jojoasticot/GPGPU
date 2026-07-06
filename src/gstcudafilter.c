@@ -31,186 +31,187 @@
  */
 
 #ifdef HAVE_CONFIG_H
-#include "config.h"
+#    include "config.h"
 #endif
 
 #include <gst/gst.h>
-#include <gst/video/video.h>
 #include <gst/video/gstvideofilter.h>
-#include "gstcudafilter.h"
-#include "filter_impl.h"
+#include <gst/video/video.h>
 
-GST_DEBUG_CATEGORY_STATIC (gst_cuda_filter_debug_category);
+#include "filter_impl.h"
+#include "gstcudafilter.h"
+
+GST_DEBUG_CATEGORY_STATIC(gst_cuda_filter_debug_category);
 #define GST_CAT_DEFAULT gst_cuda_filter_debug_category
 
 /* prototypes */
 
+static void gst_cuda_filter_set_property(GObject* object, guint property_id,
+                                         const GValue* value,
+                                         GParamSpec* pspec);
+static void gst_cuda_filter_get_property(GObject* object, guint property_id,
+                                         GValue* value, GParamSpec* pspec);
+static void gst_cuda_filter_dispose(GObject* object);
+static void gst_cuda_filter_finalize(GObject* object);
 
-static void gst_cuda_filter_set_property (GObject * object,
-    guint property_id, const GValue * value, GParamSpec * pspec);
-static void gst_cuda_filter_get_property (GObject * object,
-    guint property_id, GValue * value, GParamSpec * pspec);
-static void gst_cuda_filter_dispose (GObject * object);
-static void gst_cuda_filter_finalize (GObject * object);
+static gboolean gst_cuda_filter_start(GstBaseTransform* trans);
+static gboolean gst_cuda_filter_stop(GstBaseTransform* trans);
+static gboolean gst_cuda_filter_set_info(GstVideoFilter* filter,
+                                         GstCaps* incaps, GstVideoInfo* in_info,
+                                         GstCaps* outcaps,
+                                         GstVideoInfo* out_info);
 
-static gboolean gst_cuda_filter_start (GstBaseTransform * trans);
-static gboolean gst_cuda_filter_stop (GstBaseTransform * trans);
-static gboolean gst_cuda_filter_set_info (GstVideoFilter * filter, GstCaps * incaps,
-    GstVideoInfo * in_info, GstCaps * outcaps, GstVideoInfo * out_info);
-
-//static GstFlowReturn gst_cuda_filter_transform_frame (GstVideoFilter * filter, GstVideoFrame * inframe, GstVideoFrame * outframe);
-static GstFlowReturn gst_cuda_filter_transform_frame_ip (GstVideoFilter * filter, GstVideoFrame * frame);
+// static GstFlowReturn gst_cuda_filter_transform_frame (GstVideoFilter *
+// filter, GstVideoFrame * inframe, GstVideoFrame * outframe);
+static GstFlowReturn gst_cuda_filter_transform_frame_ip(GstVideoFilter* filter,
+                                                        GstVideoFrame* frame);
 
 enum
 {
-  PROP_0
+    PROP_0
 };
 
 /* pad templates */
 
 /* FIXME: add/remove formats you can handle */
-#define VIDEO_SRC_CAPS \
-    GST_VIDEO_CAPS_MAKE("{ RGB }")
+#define VIDEO_SRC_CAPS GST_VIDEO_CAPS_MAKE("{ RGB }")
 
 /* FIXME: add/remove formats you can handle */
-#define VIDEO_SINK_CAPS \
-    GST_VIDEO_CAPS_MAKE("{ RGB }")
-
+#define VIDEO_SINK_CAPS GST_VIDEO_CAPS_MAKE("{ RGB }")
 
 /* class initialization */
 
-G_DEFINE_TYPE_WITH_CODE (GstCudaFilter, gst_cuda_filter, GST_TYPE_VIDEO_FILTER,
-  GST_DEBUG_CATEGORY_INIT (gst_cuda_filter_debug_category, "cudafilter", 0,
-  "debug category for cudafilter element"));
+G_DEFINE_TYPE_WITH_CODE(
+    GstCudaFilter, gst_cuda_filter, GST_TYPE_VIDEO_FILTER,
+    GST_DEBUG_CATEGORY_INIT(gst_cuda_filter_debug_category, "cudafilter", 0,
+                            "debug category for cudafilter element"));
 
-static void
-gst_cuda_filter_class_init (GstCudaFilterClass * klass)
+static void gst_cuda_filter_class_init(GstCudaFilterClass* klass)
 {
-  GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
-  GstBaseTransformClass *base_transform_class = GST_BASE_TRANSFORM_CLASS (klass);
-  GstVideoFilterClass *video_filter_class = GST_VIDEO_FILTER_CLASS (klass);
+    GObjectClass* gobject_class = G_OBJECT_CLASS(klass);
+    GstBaseTransformClass* base_transform_class =
+        GST_BASE_TRANSFORM_CLASS(klass);
+    GstVideoFilterClass* video_filter_class = GST_VIDEO_FILTER_CLASS(klass);
 
-  /* Setting up pads and setting metadata should be moved to
-     base_class_init if you intend to subclass this class. */
-  gst_element_class_add_pad_template (GST_ELEMENT_CLASS(klass),
-      gst_pad_template_new ("src", GST_PAD_SRC, GST_PAD_ALWAYS,
-        gst_caps_from_string (VIDEO_SRC_CAPS)));
-  gst_element_class_add_pad_template (GST_ELEMENT_CLASS(klass),
-      gst_pad_template_new ("sink", GST_PAD_SINK, GST_PAD_ALWAYS,
-        gst_caps_from_string (VIDEO_SINK_CAPS)));
+    /* Setting up pads and setting metadata should be moved to
+       base_class_init if you intend to subclass this class. */
+    gst_element_class_add_pad_template(
+        GST_ELEMENT_CLASS(klass),
+        gst_pad_template_new("src", GST_PAD_SRC, GST_PAD_ALWAYS,
+                             gst_caps_from_string(VIDEO_SRC_CAPS)));
+    gst_element_class_add_pad_template(
+        GST_ELEMENT_CLASS(klass),
+        gst_pad_template_new("sink", GST_PAD_SINK, GST_PAD_ALWAYS,
+                             gst_caps_from_string(VIDEO_SINK_CAPS)));
 
-  gst_element_class_set_static_metadata (GST_ELEMENT_CLASS(klass),
-      "FIXME Long name", "Generic", "FIXME Description",
-      "FIXME <fixme@example.com>");
+    gst_element_class_set_static_metadata(
+        GST_ELEMENT_CLASS(klass), "FIXME Long name", "Generic",
+        "FIXME Description", "FIXME <fixme@example.com>");
 
-  gobject_class->set_property = gst_cuda_filter_set_property;
-  gobject_class->get_property = gst_cuda_filter_get_property;
-  gobject_class->dispose = gst_cuda_filter_dispose;
-  gobject_class->finalize = gst_cuda_filter_finalize;
-  base_transform_class->start = GST_DEBUG_FUNCPTR (gst_cuda_filter_start);
-  base_transform_class->stop = GST_DEBUG_FUNCPTR (gst_cuda_filter_stop);
-  video_filter_class->set_info = GST_DEBUG_FUNCPTR (gst_cuda_filter_set_info);
-  //video_filter_class->transform_frame = GST_DEBUG_FUNCPTR (gst_cuda_filter_transform_frame);
-  video_filter_class->transform_frame_ip = GST_DEBUG_FUNCPTR (gst_cuda_filter_transform_frame_ip);
-
+    gobject_class->set_property = gst_cuda_filter_set_property;
+    gobject_class->get_property = gst_cuda_filter_get_property;
+    gobject_class->dispose = gst_cuda_filter_dispose;
+    gobject_class->finalize = gst_cuda_filter_finalize;
+    base_transform_class->start = GST_DEBUG_FUNCPTR(gst_cuda_filter_start);
+    base_transform_class->stop = GST_DEBUG_FUNCPTR(gst_cuda_filter_stop);
+    video_filter_class->set_info = GST_DEBUG_FUNCPTR(gst_cuda_filter_set_info);
+    // video_filter_class->transform_frame = GST_DEBUG_FUNCPTR
+    // (gst_cuda_filter_transform_frame);
+    video_filter_class->transform_frame_ip =
+        GST_DEBUG_FUNCPTR(gst_cuda_filter_transform_frame_ip);
 }
 
-static void
-gst_cuda_filter_init (GstCudaFilter *cudafilter)
+static void gst_cuda_filter_init(GstCudaFilter* cudafilter)
+{}
+
+void gst_cuda_filter_set_property(GObject* object, guint property_id,
+                                  const GValue* value, GParamSpec* pspec)
 {
-}
+    GstCudaFilter* cudafilter = GST_CUDA_FILTER(object);
 
-void
-gst_cuda_filter_set_property (GObject * object, guint property_id,
-    const GValue * value, GParamSpec * pspec)
-{
-  GstCudaFilter *cudafilter = GST_CUDA_FILTER (object);
+    GST_DEBUG_OBJECT(cudafilter, "set_property");
 
-  GST_DEBUG_OBJECT (cudafilter, "set_property");
-
-  switch (property_id) {
+    switch (property_id)
+    {
     default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
-      break;
-  }
+        G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
+        break;
+    }
 }
 
-void
-gst_cuda_filter_get_property (GObject * object, guint property_id,
-    GValue * value, GParamSpec * pspec)
+void gst_cuda_filter_get_property(GObject* object, guint property_id,
+                                  GValue* value, GParamSpec* pspec)
 {
-  GstCudaFilter *cudafilter = GST_CUDA_FILTER (object);
+    GstCudaFilter* cudafilter = GST_CUDA_FILTER(object);
 
-  GST_DEBUG_OBJECT (cudafilter, "get_property");
+    GST_DEBUG_OBJECT(cudafilter, "get_property");
 
-  switch (property_id) {
+    switch (property_id)
+    {
     default:
-      G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
-      break;
-  }
+        G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
+        break;
+    }
 }
 
-void
-gst_cuda_filter_dispose (GObject * object)
+void gst_cuda_filter_dispose(GObject* object)
 {
-  GstCudaFilter *cudafilter = GST_CUDA_FILTER (object);
+    GstCudaFilter* cudafilter = GST_CUDA_FILTER(object);
 
-  GST_DEBUG_OBJECT (cudafilter, "dispose");
+    GST_DEBUG_OBJECT(cudafilter, "dispose");
 
-  /* clean up as possible.  may be called multiple times */
+    /* clean up as possible.  may be called multiple times */
 
-  G_OBJECT_CLASS (gst_cuda_filter_parent_class)->dispose (object);
+    G_OBJECT_CLASS(gst_cuda_filter_parent_class)->dispose(object);
 }
 
-void
-gst_cuda_filter_finalize (GObject * object)
+void gst_cuda_filter_finalize(GObject* object)
 {
-  GstCudaFilter *cudafilter = GST_CUDA_FILTER (object);
+    GstCudaFilter* cudafilter = GST_CUDA_FILTER(object);
 
-  GST_DEBUG_OBJECT (cudafilter, "finalize");
+    GST_DEBUG_OBJECT(cudafilter, "finalize");
 
-  /* clean up object here */
+    /* clean up object here */
 
-  G_OBJECT_CLASS (gst_cuda_filter_parent_class)->finalize (object);
+    G_OBJECT_CLASS(gst_cuda_filter_parent_class)->finalize(object);
 }
 
-static gboolean
-gst_cuda_filter_start (GstBaseTransform * trans)
+static gboolean gst_cuda_filter_start(GstBaseTransform* trans)
 {
-  GstCudaFilter *cudafilter = GST_CUDA_FILTER (trans);
+    GstCudaFilter* cudafilter = GST_CUDA_FILTER(trans);
 
-  GST_DEBUG_OBJECT (cudafilter, "start");
+    GST_DEBUG_OBJECT(cudafilter, "start");
 
-  return TRUE;
+    return TRUE;
 }
 
-static gboolean
-gst_cuda_filter_stop (GstBaseTransform * trans)
+static gboolean gst_cuda_filter_stop(GstBaseTransform* trans)
 {
-  GstCudaFilter *cudafilter = GST_CUDA_FILTER (trans);
+    GstCudaFilter* cudafilter = GST_CUDA_FILTER(trans);
 
-  GST_DEBUG_OBJECT (cudafilter, "stop");
+    GST_DEBUG_OBJECT(cudafilter, "stop");
 
-  return TRUE;
+    return TRUE;
 }
 
-static gboolean
-gst_cuda_filter_set_info (GstVideoFilter * filter, GstCaps * incaps,
-    GstVideoInfo * in_info, GstCaps * outcaps, GstVideoInfo * out_info)
+static gboolean gst_cuda_filter_set_info(GstVideoFilter* filter,
+                                         GstCaps* incaps, GstVideoInfo* in_info,
+                                         GstCaps* outcaps,
+                                         GstVideoInfo* out_info)
 {
-  GstCudaFilter *cudafilter = GST_CUDA_FILTER (filter);
+    GstCudaFilter* cudafilter = GST_CUDA_FILTER(filter);
 
-  GST_DEBUG_OBJECT (cudafilter, "set_info");
+    GST_DEBUG_OBJECT(cudafilter, "set_info");
 
-  return TRUE;
+    return TRUE;
 }
 
 /* transform */
 /* Uncomment if you want a transform not inplace
 
 static GstFlowReturn
-gst_cuda_filter_transform_frame (GstVideoFilter * filter, GstVideoFrame * inframe,
-    GstVideoFrame * outframe)
+gst_cuda_filter_transform_frame (GstVideoFilter * filter, GstVideoFrame *
+inframe, GstVideoFrame * outframe)
 {
   GstCudaFilter *cudafilter = GST_CUDA_FILTER (filter);
 
@@ -220,37 +221,31 @@ gst_cuda_filter_transform_frame (GstVideoFilter * filter, GstVideoFrame * infram
 }
 */
 
-static GstFlowReturn
-gst_cuda_filter_transform_frame_ip (GstVideoFilter * filter, GstVideoFrame * frame)
+static GstFlowReturn gst_cuda_filter_transform_frame_ip(GstVideoFilter* filter,
+                                                        GstVideoFrame* frame)
 {
-  GstCudaFilter *cudafilter = GST_CUDA_FILTER (filter);
+    GstCudaFilter* cudafilter = GST_CUDA_FILTER(filter);
 
-  GST_DEBUG_OBJECT (cudafilter, "transform_frame_ip");
+    GST_DEBUG_OBJECT(cudafilter, "transform_frame_ip");
 
+    int width = GST_VIDEO_FRAME_COMP_WIDTH(frame, 0);
+    int height = GST_VIDEO_FRAME_COMP_HEIGHT(frame, 0);
 
+    uint8_t* pixels = GST_VIDEO_FRAME_PLANE_DATA(frame, 0);
+    int plane_stride = GST_VIDEO_FRAME_PLANE_STRIDE(frame, 0);
+    int pixel_stride = GST_VIDEO_FRAME_COMP_PSTRIDE(frame, 0);
 
-  int width = GST_VIDEO_FRAME_COMP_WIDTH(frame, 0);
-  int height = GST_VIDEO_FRAME_COMP_HEIGHT(frame, 0);
+    filter_impl(pixels, width, height, plane_stride, pixel_stride);
 
-  uint8_t* pixels = GST_VIDEO_FRAME_PLANE_DATA(frame, 0);
-  int plane_stride = GST_VIDEO_FRAME_PLANE_STRIDE(frame, 0);
-  int pixel_stride = GST_VIDEO_FRAME_COMP_PSTRIDE(frame, 0);
-
-  filter_impl(pixels, width, height, plane_stride, pixel_stride);
-
-
-
-  return GST_FLOW_OK;
+    return GST_FLOW_OK;
 }
 
-static gboolean
-plugin_init (GstPlugin * plugin)
+static gboolean plugin_init(GstPlugin* plugin)
 {
-
-  /* FIXME Remember to set the rank if it's an element that is meant
-     to be autoplugged by decodebin. */
-  return gst_element_register (plugin, "cudafilter", GST_RANK_NONE,
-      GST_TYPE_CUDA_FILTER);
+    /* FIXME Remember to set the rank if it's an element that is meant
+       to be autoplugged by decodebin. */
+    return gst_element_register(plugin, "cudafilter", GST_RANK_NONE,
+                                GST_TYPE_CUDA_FILTER);
 }
 
 /* FIXME: these are normally defined by the GStreamer build system.
@@ -258,21 +253,18 @@ plugin_init (GstPlugin * plugin)
    remove these, as they're always defined.  Otherwise, edit as
    appropriate for your external plugin package. */
 #ifndef VERSION
-#define VERSION "0.0.FIXME"
+#    define VERSION "0.0.FIXME"
 #endif
 #ifndef PACKAGE
-#define PACKAGE "FIXME_package"
+#    define PACKAGE "FIXME_package"
 #endif
 #ifndef PACKAGE_NAME
-#define PACKAGE_NAME "FIXME_package_name"
+#    define PACKAGE_NAME "FIXME_package_name"
 #endif
 #ifndef GST_PACKAGE_ORIGIN
-#define GST_PACKAGE_ORIGIN "http://FIXME.org/"
+#    define GST_PACKAGE_ORIGIN "http://FIXME.org/"
 #endif
 
-GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,
-    GST_VERSION_MINOR,
-    cudafilter,
-    "FIXME plugin description",
-    plugin_init, VERSION, "LGPL", PACKAGE_NAME, GST_PACKAGE_ORIGIN)
-
+GST_PLUGIN_DEFINE(GST_VERSION_MAJOR, GST_VERSION_MINOR, cudafilter,
+                  "FIXME plugin description", plugin_init, VERSION, "LGPL",
+                  PACKAGE_NAME, GST_PACKAGE_ORIGIN)

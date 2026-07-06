@@ -20,32 +20,35 @@
 #ifndef _GST_CUDA_FILTER_H_
 #define _GST_CUDA_FILTER_H_
 
-#include <gst/video/video.h>
 #include <gst/video/gstvideofilter.h>
+#include <gst/video/video.h>
 
 G_BEGIN_DECLS
 
-#define GST_TYPE_CUDA_FILTER   (gst_cuda_filter_get_type())
-#define GST_CUDA_FILTER(obj)   (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_CUDA_FILTER,GstCudaFilter))
-#define GST_CUDA_FILTER_CLASS(klass)   (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_CUDA_FILTER,GstCudaFilterClass))
-#define GST_IS_CUDA_FILTER(obj)   (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_CUDA_FILTER))
-#define GST_IS_CUDA_FILTER_CLASS(obj)   (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_CUDA_FILTER))
+#define GST_TYPE_CUDA_FILTER (gst_cuda_filter_get_type())
+#define GST_CUDA_FILTER(obj)                                                   \
+    (G_TYPE_CHECK_INSTANCE_CAST((obj), GST_TYPE_CUDA_FILTER, GstCudaFilter))
+#define GST_CUDA_FILTER_CLASS(klass)                                           \
+    (G_TYPE_CHECK_CLASS_CAST((klass), GST_TYPE_CUDA_FILTER, GstCudaFilterClass))
+#define GST_IS_CUDA_FILTER(obj)                                                \
+    (G_TYPE_CHECK_INSTANCE_TYPE((obj), GST_TYPE_CUDA_FILTER))
+#define GST_IS_CUDA_FILTER_CLASS(obj)                                          \
+    (G_TYPE_CHECK_CLASS_TYPE((klass), GST_TYPE_CUDA_FILTER))
 
 typedef struct _GstCudaFilter GstCudaFilter;
 typedef struct _GstCudaFilterClass GstCudaFilterClass;
 
 struct _GstCudaFilter
 {
-  GstVideoFilter base_cudafilter;
-
+    GstVideoFilter base_cudafilter;
 };
 
 struct _GstCudaFilterClass
 {
-  GstVideoFilterClass base_cudafilter_class;
+    GstVideoFilterClass base_cudafilter_class;
 };
 
-GType gst_cuda_filter_get_type (void);
+GType gst_cuda_filter_get_type(void);
 
 G_END_DECLS
 
