@@ -1,9 +1,8 @@
 #include <cassert>
 #include <chrono>
 #include <cstdio>
-#include <thread>
-
 #include <curand_kernel.h>
+#include <thread>
 
 #include "filter_impl.h"
 
@@ -40,12 +39,11 @@ struct reservoir
 
 __device__ int pixel_diff(rgb p1, rgb p2)
 {
-  int r = abs(p1.r - p2.r);
-  int g = abs(p1.g - p2.g);
-  int b = abs(p1.b - p2.b);
-  return sqrtf(r*r + g*g + b*b);
+    int r = abs(p1.r - p2.r);
+    int g = abs(p1.g - p2.g);
+    int b = abs(p1.b - p2.b);
+    return sqrtf(r * r + g * g + b * b);
 }
-
 
 __device__ int find_matching_reservoir(rgb p, reservoir* rs)
 {
@@ -55,10 +53,10 @@ __device__ int find_matching_reservoir(rgb p, reservoir* rs)
     {
         if (rs[i].w > 0)
         {
-          if(abs(p.r - rs[i].rgb.r) < RGB_DIFF_THRESHOLD && 
-            abs(p.g - rs[i].rgb.g) < RGB_DIFF_THRESHOLD && 
-            abs(p.b - rs[i].rgb.b) < RGB_DIFF_THRESHOLD)
-            return i;
+            if (abs(p.r - rs[i].rgb.r) < RGB_DIFF_THRESHOLD
+                && abs(p.g - rs[i].rgb.g) < RGB_DIFF_THRESHOLD
+                && abs(p.b - rs[i].rgb.b) < RGB_DIFF_THRESHOLD)
+                return i;
         }
         else
             m_idx = i;
@@ -67,21 +65,14 @@ __device__ int find_matching_reservoir(rgb p, reservoir* rs)
     return m_idx;
 }
 
-__device__ void update_weight_and_samples(reservoir* rs, int m_idx,
-                                                 rgb p)
+__device__ void update_weight_and_samples(reservoir* rs, int m_idx, rgb p)
 {
     rs[m_idx].w++;
     float w = rs[m_idx].w;
 
-    float temp_r = ((w - 1) * rs[m_idx].rgb.r
-                    + p.r)
-        / w;
-    float temp_g = ((w - 1) * rs[m_idx].rgb.g
-                    + p.g)
-        / w;
-    float temp_b = ((w - 1) * rs[m_idx].rgb.b
-                    + p.b)
-        / w;
+    float temp_r = ((w - 1) * rs[m_idx].rgb.r + p.r) / w;
+    float temp_g = ((w - 1) * rs[m_idx].rgb.g + p.g) / w;
+    float temp_b = ((w - 1) * rs[m_idx].rgb.b + p.b) / w;
 
     rs[m_idx].rgb = { static_cast<uint8_t>(temp_r),
                       static_cast<uint8_t>(temp_g),
@@ -89,8 +80,8 @@ __device__ void update_weight_and_samples(reservoir* rs, int m_idx,
 }
 
 __global__ void compute_diff_kernel(std::byte* buffer, int width, int height,
-                                     int stride, reservoir* rss,
-                                     int* diff_map, curandState* states)
+                                    int stride, reservoir* rss, int* diff_map,
+                                    curandState* states)
 {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -149,8 +140,8 @@ __global__ void compute_diff_kernel(std::byte* buffer, int width, int height,
     diff_map[idx] = pixel_diff(p, rs[max_idx].rgb) / 3;
 }
 
-__global__ void init_curand_kernel(curandState* states, int width,
-                                    int height, unsigned long long seed)
+__global__ void init_curand_kernel(curandState* states, int width, int height,
+                                   unsigned long long seed)
 {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -162,15 +153,14 @@ __global__ void init_curand_kernel(curandState* states, int width,
     curand_init(seed, idx, 0, &states[idx]);
 }
 
-__global__ void erode_kernel(const int *in, int* out, int width,
-                                  int height)
+__global__ void erode_kernel(const int* in, int* out, int width, int height)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= width || y >= height)
     {
-      return;
+        return;
     }
 
     int idx = y * width + x;
@@ -191,15 +181,14 @@ __global__ void erode_kernel(const int *in, int* out, int width,
     out[idx] = min_val;
 }
 
-__global__ void dilate_kernel(const int *in, int *out, int width,
-                                      int height)
+__global__ void dilate_kernel(const int* in, int* out, int width, int height)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= width || y >= height)
     {
-      return;
+        return;
     }
 
     int idx = y * width + x;
@@ -221,7 +210,7 @@ __global__ void dilate_kernel(const int *in, int *out, int width,
 }
 
 __global__ void threshold_kernel(const int* opened, uint8_t* I_low,
-                                     uint8_t* I_high, int width, int height)
+                                 uint8_t* I_high, int width, int height)
 {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -234,8 +223,8 @@ __global__ void threshold_kernel(const int* opened, uint8_t* I_low,
     I_high[idx] = opened[idx] > T_HIGH;
 }
 
-__global__ void hysteresis(const uint8_t* I_low, const uint8_t* I_high, uint8_t* out, int width,
-                                    int height, int* changed)
+__global__ void hysteresis(const uint8_t* I_low, const uint8_t* I_high,
+                           uint8_t* out, int width, int height, int* changed)
 {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -265,21 +254,20 @@ __global__ void hysteresis(const uint8_t* I_low, const uint8_t* I_high, uint8_t*
 }
 
 __global__ void paint_kernel(std::byte* buffer, int width, int height,
-                                 int stride, const uint8_t* mask)
+                             int stride, const uint8_t* mask)
+{
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (x >= width || y >= height)
+        return;
+
+    if (mask[y * width + x])
     {
-        int y = blockIdx.y * blockDim.y + threadIdx.y;
-        int x = blockIdx.x * blockDim.x + threadIdx.x;
-
-        if (x >= width || y >= height)
-            return;
-
-        if (mask[y * width + x])
-        {
-            rgb* lineptr = (rgb*)(buffer + y * stride);
-            lineptr[x].r = 255;
-        }
+        rgb* lineptr = (rgb*)(buffer + y * stride);
+        lineptr[x].r = 255;
     }
-
+}
 
 extern "C"
 {
@@ -306,7 +294,8 @@ extern "C"
 
         if (rss == nullptr)
         {
-            err = cudaMallocPitch(&dBuffer, &dPitch, width * sizeof(rgb), height);
+            err =
+                cudaMallocPitch(&dBuffer, &dPitch, width * sizeof(rgb), height);
             CHECK_CUDA_ERROR(err);
 
             err = cudaMalloc(&rss, width * height * K * sizeof(reservoir));
@@ -314,7 +303,8 @@ extern "C"
             err = cudaMemset(rss, 0, width * height * K * sizeof(reservoir));
             CHECK_CUDA_ERROR(err);
 
-            err = cudaMalloc(&rand_states, width * height * sizeof(curandState));
+            err =
+                cudaMalloc(&rand_states, width * height * sizeof(curandState));
             CHECK_CUDA_ERROR(err);
             init_curand_kernel<<<gridSize, blockSize>>>(rand_states, width,
                                                         height, 1234ULL);
