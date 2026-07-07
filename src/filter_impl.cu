@@ -53,9 +53,12 @@ __device__ int find_matching_reservoir(rgb p, reservoir* rs)
     {
         if (rs[i].w > 0)
         {
-            if (abs(p.r - rs[i].rgb.r) < RGB_DIFF_THRESHOLD
-                && abs(p.g - rs[i].rgb.g) < RGB_DIFF_THRESHOLD
-                && abs(p.b - rs[i].rgb.b) < RGB_DIFF_THRESHOLD)
+            if (abs(static_cast<int>(p.r) - static_cast<int>(rs[i].rgb.r))
+                    < RGB_DIFF_THRESHOLD
+                && abs(static_cast<int>(p.g) - static_cast<int>(rs[i].rgb.g))
+                    < RGB_DIFF_THRESHOLD
+                && abs(static_cast<int>(p.b) - static_cast<int>(rs[i].rgb.b))
+                    < RGB_DIFF_THRESHOLD)
                 return i;
         }
         else
@@ -80,8 +83,8 @@ __device__ void update_weight_and_samples(reservoir* rs, int m_idx, rgb p)
 }
 
 __global__ void compute_diff_kernel(std::byte* buffer, int width, int height,
-                                    int stride, reservoir* rss, int* diff_map,
-                                    curandState* states)
+                                    size_t stride, reservoir* rss,
+                                    int* diff_map, curandState* states)
 {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -240,7 +243,7 @@ __global__ void hysteresis(const uint8_t* I_low, const uint8_t* I_high,
     if (I_high[idx])
     {
         out[idx] = 1;
-        atomicExch(changed, 1);
+        *changed = 1;
         return;
     }
 
@@ -249,7 +252,7 @@ __global__ void hysteresis(const uint8_t* I_low, const uint8_t* I_high,
         || (x + 1 < width && out[idx + 1]))
     {
         out[idx] = 1;
-        atomicExch(changed, 1);
+        *changed = 1;
     }
 }
 
@@ -282,7 +285,7 @@ extern "C"
         static reservoir* rss = nullptr;
         static curandState* rand_states = nullptr;
         static int* diff_map = nullptr;
-        static int* tmp = nullptr;
+        static int* eroded_diff_map = nullptr;
         static uint8_t* I_low = nullptr;
         static uint8_t* I_high = nullptr;
         static uint8_t* mask = nullptr;
@@ -291,6 +294,12 @@ extern "C"
         dim3 blockSize(16, 16);
         dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x,
                       (height + (blockSize.y - 1)) / blockSize.y);
+
+        // first frame, do all the allocations and init functions
+
+        // we will not call cudaFree on those allocations since we cannot know
+        // when we are in the last frame. the process will free it
+        // automatically anyway
 
         if (rss == nullptr)
         {
@@ -312,7 +321,7 @@ extern "C"
 
             err = cudaMalloc(&diff_map, width * height * sizeof(int));
             CHECK_CUDA_ERROR(err);
-            err = cudaMalloc(&tmp, width * height * sizeof(int));
+            err = cudaMalloc(&eroded_diff_map, width * height * sizeof(int));
             CHECK_CUDA_ERROR(err);
 
             err = cudaMalloc(&I_low, width * height * sizeof(uint8_t));
@@ -331,14 +340,16 @@ extern "C"
         CHECK_CUDA_ERROR(err);
 
         compute_diff_kernel<<<gridSize, blockSize>>>(
-            dBuffer, width, height, static_cast<int>(dPitch), rss, diff_map,
-            rand_states);
+            dBuffer, width, height, dPitch, rss, diff_map, rand_states);
         CHECK_CUDA_ERROR(cudaGetLastError());
 
-        erode_kernel<<<gridSize, blockSize>>>(diff_map, tmp, width, height);
+        erode_kernel<<<gridSize, blockSize>>>(diff_map, eroded_diff_map, width,
+                                              height);
         CHECK_CUDA_ERROR(cudaGetLastError());
 
-        dilate_kernel<<<gridSize, blockSize>>>(tmp, diff_map, width, height);
+        // dilate on eroded diff_map -> opening of diff_map
+        dilate_kernel<<<gridSize, blockSize>>>(eroded_diff_map, diff_map, width,
+                                               height);
         CHECK_CUDA_ERROR(cudaGetLastError());
 
         threshold_kernel<<<gridSize, blockSize>>>(diff_map, I_low, I_high,
