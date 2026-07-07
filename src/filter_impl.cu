@@ -214,20 +214,6 @@ __global__ void dilate_threshold_kernel(const int* in, int width, int height,
     I_high[idx] = max_val > T_LOW;
 }
 
-__global__ void threshold_kernel(const int* opened, uint8_t* I_low,
-                                 uint8_t* I_high, int width, int height)
-{
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (x >= width || y >= height)
-        return;
-
-    int idx = y * width + x;
-    I_low[idx] = opened[idx] > T_LOW;
-    I_high[idx] = opened[idx] > T_HIGH;
-}
-
 __global__ void hysteresis(const uint8_t* I_low, const uint8_t* I_high,
                            uint8_t* out, int width, int height, int* changed)
 {
@@ -350,13 +336,10 @@ extern "C"
         CHECK_CUDA_ERROR(cudaGetLastError());
 
         // dilate on eroded diff_map -> opening of diff_map
+        // compute thresholds directly
         dilate_threshold_kernel<<<gridSize, blockSize>>>(eroded_diff_map, width,
                                                          height, I_low, I_high);
         CHECK_CUDA_ERROR(cudaGetLastError());
-
-        // threshold_kernel<<<gridSize, blockSize>>>(diff_map, I_low, I_high,
-        //                                           width, height);
-        // CHECK_CUDA_ERROR(cudaGetLastError());
 
         err = cudaMemset(mask, 0, width * height * sizeof(uint8_t));
         CHECK_CUDA_ERROR(err);
