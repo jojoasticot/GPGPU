@@ -184,7 +184,8 @@ __global__ void erode_kernel(const int* in, int* out, int width, int height)
     out[idx] = min_val;
 }
 
-__global__ void dilate_kernel(const int* in, int* out, int width, int height)
+__global__ void dilate_threshold_kernel(const int* in, int width, int height,
+                                        uint8_t* I_low, uint8_t* I_high)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -209,7 +210,8 @@ __global__ void dilate_kernel(const int* in, int* out, int width, int height)
     if (x + 1 < width)
         max_val = max(max_val, in[idx + 1]);
 
-    out[idx] = max_val;
+    I_low[idx] = max_val > T_LOW;
+    I_high[idx] = max_val > T_LOW;
 }
 
 __global__ void threshold_kernel(const int* opened, uint8_t* I_low,
@@ -348,13 +350,13 @@ extern "C"
         CHECK_CUDA_ERROR(cudaGetLastError());
 
         // dilate on eroded diff_map -> opening of diff_map
-        dilate_kernel<<<gridSize, blockSize>>>(eroded_diff_map, diff_map, width,
-                                               height);
+        dilate_threshold_kernel<<<gridSize, blockSize>>>(eroded_diff_map, width,
+                                                         height, I_low, I_high);
         CHECK_CUDA_ERROR(cudaGetLastError());
 
-        threshold_kernel<<<gridSize, blockSize>>>(diff_map, I_low, I_high,
-                                                  width, height);
-        CHECK_CUDA_ERROR(cudaGetLastError());
+        // threshold_kernel<<<gridSize, blockSize>>>(diff_map, I_low, I_high,
+        //                                           width, height);
+        // CHECK_CUDA_ERROR(cudaGetLastError());
 
         err = cudaMemset(mask, 0, width * height * sizeof(uint8_t));
         CHECK_CUDA_ERROR(err);
