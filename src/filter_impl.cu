@@ -47,6 +47,48 @@ __device__ int pixel_diff(rgb p1, rgb p2)
   return sqrtf(r*r + g*g + b*b);
 }
 
+
+__device__ int find_matching_reservoir(rgb p, reservoir* rs)
+{
+    int m_idx = -1;
+
+    for (int i = 0; i < K; i++)
+    {
+        if (rs[i].w > 0)
+        {
+          if(abs(p.r - rs[i].rgb.r) < RGB_DIFF_THRESHOLD && 
+            abs(p.g - rs[i].rgb.g) < RGB_DIFF_THRESHOLD && 
+            abs(p.b - rs[i].rgb.b) < RGB_DIFF_THRESHOLD)
+            return i;
+        }
+        else
+            m_idx = i;
+    }
+
+    return m_idx;
+}
+
+__device__ void update_weight_and_samples(reservoir* rs, int m_idx,
+                                                 rgb p)
+{
+    rs[m_idx].w++;
+    float w = rs[m_idx].w;
+
+    float temp_r = ((w - 1) * rs[m_idx].rgb.r
+                    + p.r)
+        / w;
+    float temp_g = ((w - 1) * rs[m_idx].rgb.g
+                    + p.g)
+        / w;
+    float temp_b = ((w - 1) * rs[m_idx].rgb.b
+                    + p.b)
+        / w;
+
+    rs[m_idx].rgb = { temp_r,
+                      temp_g,
+                      temp_b };
+}
+
 /// @brief Black out the red channel from the video and add EPITA's logo
 /// @param buffer
 /// @param width
