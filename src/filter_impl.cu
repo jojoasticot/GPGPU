@@ -20,6 +20,12 @@ void check(T err, const char* const func, const char* const file,
     }
 }
 
+constexpr int RGB_DIFF_THRESHOLD = 40;
+constexpr int K = 7;
+constexpr int MAX_WEIGHTS = 150;
+constexpr int T_LOW = 20;
+constexpr int T_HIGH = 50;
+
 struct rgb
 {
     uint8_t r, g, b;
