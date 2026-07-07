@@ -45,19 +45,23 @@ __device__ int pixel_diff(rgb p1, rgb p2)
     return sqrtf(r * r + g * g + b * b);
 }
 
-__device__ int find_matching_reservoir(rgb p, reservoir* rs)
+__device__ int find_matching_reservoir(rgb p, rgb* colors, float* weights,
+                                       int num_pixels, int idx)
 {
     int m_idx = -1;
 
     for (int i = 0; i < K; i++)
     {
-        if (rs[i].w > 0)
+        int rss_idx = i * num_pixels + idx;
+        if (weights[rss_idx] > 0)
         {
-            if (abs(static_cast<int>(p.r) - static_cast<int>(rs[i].rgb.r))
+            if (abs(static_cast<int>(p.r) - static_cast<int>(colors[rss_idx].r))
                     < RGB_DIFF_THRESHOLD
-                && abs(static_cast<int>(p.g) - static_cast<int>(rs[i].rgb.g))
+                && abs(static_cast<int>(p.g)
+                       - static_cast<int>(colors[rss_idx].g))
                     < RGB_DIFF_THRESHOLD
-                && abs(static_cast<int>(p.b) - static_cast<int>(rs[i].rgb.b))
+                && abs(static_cast<int>(p.b)
+                       - static_cast<int>(colors[rss_idx].b))
                     < RGB_DIFF_THRESHOLD)
                 return i;
         }
@@ -68,22 +72,25 @@ __device__ int find_matching_reservoir(rgb p, reservoir* rs)
     return m_idx;
 }
 
-__device__ void update_weight_and_samples(reservoir* rs, int m_idx, rgb p)
+__device__ void update_weight_and_samples(rgb* colors, float* weights,
+                                          int m_idx, rgb p, int num_pixels,
+                                          int idx)
 {
-    rs[m_idx].w++;
-    float w = rs[m_idx].w;
+    int rss_idx = m_idx * num_pixels + idx;
+    weights[rss_idx]++;
+    float w = weights[rss_idx];
 
-    float temp_r = ((w - 1) * rs[m_idx].rgb.r + p.r) / w;
-    float temp_g = ((w - 1) * rs[m_idx].rgb.g + p.g) / w;
-    float temp_b = ((w - 1) * rs[m_idx].rgb.b + p.b) / w;
+    float temp_r = ((w - 1) * colors[rss_idx].r + p.r) / w;
+    float temp_g = ((w - 1) * colors[rss_idx].g + p.g) / w;
+    float temp_b = ((w - 1) * colors[rss_idx].b + p.b) / w;
 
-    rs[m_idx].rgb = { static_cast<uint8_t>(temp_r),
-                      static_cast<uint8_t>(temp_g),
-                      static_cast<uint8_t>(temp_b) };
+    colors[rss_idx] = { static_cast<uint8_t>(temp_r),
+                        static_cast<uint8_t>(temp_g),
+                        static_cast<uint8_t>(temp_b) };
 }
 
 __global__ void compute_diff_kernel(std::byte* buffer, int width, int height,
-                                    size_t stride, reservoir* rss,
+                                    size_t stride, rgb* colors, float* weights,
                                     int* diff_map, curandState* states)
 {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -95,52 +102,57 @@ __global__ void compute_diff_kernel(std::byte* buffer, int width, int height,
     int idx = y * width + x;
     rgb* lineptr = (rgb*)(buffer + y * stride);
     rgb p = lineptr[x];
-    reservoir* rs = &rss[idx * K];
+    int num_pixels = width * height;
 
-    int m_idx = find_matching_reservoir(p, rs);
+    // we access rss[rs_i * num_pixels + idx] to have coalesced access across
+    // threads
 
-    if (m_idx != -1 && rs[m_idx].w > 0)
-        update_weight_and_samples(rs, m_idx, p);
-    else if (m_idx != -1 && rs[m_idx].w == 0)
+    int m_idx = find_matching_reservoir(p, colors, weights, num_pixels, idx);
+
+    if (m_idx != -1 && weights[m_idx * num_pixels + idx] > 0)
+        update_weight_and_samples(colors, weights, m_idx, p, num_pixels, idx);
+    else if (m_idx != -1 && weights[m_idx * num_pixels + idx] == 0)
     {
-        rs[m_idx].rgb = p;
-        rs[m_idx].w = 1;
+        colors[m_idx * num_pixels + idx] = p;
+        weights[m_idx * num_pixels + idx] = 1;
     }
     else
     {
         m_idx = 0;
-        float total_weight = rs[0].w;
+        float total_weight = weights[0 * num_pixels + idx];
 
         for (int i = 1; i < K; i++)
         {
-            if (rs[i].w < rs[m_idx].w)
+            if (weights[i * num_pixels + idx]
+                < weights[m_idx * num_pixels + idx])
                 m_idx = i;
 
-            total_weight += rs[i].w;
+            total_weight += weights[i * num_pixels + idx];
         }
 
         curandState local_state = states[idx];
         float rand_float = curand_uniform(&local_state);
         states[idx] = local_state;
 
-        if (rand_float * total_weight >= rs[m_idx].w)
+        if (rand_float * total_weight >= weights[m_idx * num_pixels + idx])
         {
-            rs[m_idx].rgb = p;
-            rs[m_idx].w = 1;
+            colors[m_idx * num_pixels + idx] = p;
+            weights[m_idx * num_pixels + idx] = 1;
         }
     }
 
     for (int i = 0; i < K; i++)
-        if (rs[i].w > MAX_WEIGHTS)
-            rs[i].w = MAX_WEIGHTS;
+        if (weights[i * num_pixels + idx] > MAX_WEIGHTS)
+            weights[i * num_pixels + idx] = MAX_WEIGHTS;
 
     int max_idx = 0;
 
     for (int i = 1; i < K; i++)
-        if (rs[max_idx].w <= rs[i].w)
+        if (weights[max_idx * num_pixels + idx]
+            <= weights[i * num_pixels + idx])
             max_idx = i;
 
-    diff_map[idx] = pixel_diff(p, rs[max_idx].rgb) / 3;
+    diff_map[idx] = pixel_diff(p, colors[max_idx * num_pixels + idx]) / 3;
 }
 
 __global__ void init_curand_kernel(curandState* states, int width, int height,
@@ -286,7 +298,8 @@ extern "C"
 
         static std::byte* dBuffer = nullptr;
         static size_t dPitch = 0;
-        static reservoir* rss = nullptr;
+        static rgb* colors = nullptr;
+        static float* weights = nullptr;
         static curandState* rand_states = nullptr;
         static int* diff_map = nullptr;
         static int* eroded_diff_map = nullptr;
@@ -305,15 +318,20 @@ extern "C"
         // when we are in the last frame. the process will free it
         // automatically anyway
 
-        if (rss == nullptr)
+        if (colors == nullptr)
         {
             err =
                 cudaMallocPitch(&dBuffer, &dPitch, width * sizeof(rgb), height);
             CHECK_CUDA_ERROR(err);
 
-            err = cudaMalloc(&rss, width * height * K * sizeof(reservoir));
+            err = cudaMalloc(&colors, width * height * K * sizeof(rgb));
             CHECK_CUDA_ERROR(err);
-            err = cudaMemset(rss, 0, width * height * K * sizeof(reservoir));
+            err = cudaMemset(colors, 0, width * height * K * sizeof(rgb));
+            CHECK_CUDA_ERROR(err);
+
+            err = cudaMalloc(&weights, width * height * K * sizeof(float));
+            CHECK_CUDA_ERROR(err);
+            err = cudaMemset(weights, 0, width * height * K * sizeof(float));
             CHECK_CUDA_ERROR(err);
 
             err =
@@ -343,8 +361,9 @@ extern "C"
                            width * sizeof(rgb), height, cudaMemcpyDefault);
         CHECK_CUDA_ERROR(err);
 
-        compute_diff_kernel<<<gridSize, blockSize>>>(
-            dBuffer, width, height, dPitch, rss, diff_map, rand_states);
+        compute_diff_kernel<<<gridSize, blockSize>>>(dBuffer, width, height,
+                                                     dPitch, colors, weights,
+                                                     diff_map, rand_states);
         CHECK_CUDA_ERROR(cudaGetLastError());
 
         erode_kernel<<<gridSize, blockSize>>>(diff_map, eroded_diff_map, width,
