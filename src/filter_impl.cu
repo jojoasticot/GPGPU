@@ -245,31 +245,82 @@ __global__ void dilate_threshold_kernel(const int* in, int width, int height,
 __global__ void hysteresis(const uint8_t* I_low, const uint8_t* I_high,
                            uint8_t* out, int width, int height, int* changed)
 {
+    constexpr int TILE_WIDTH = 16 + 2;
+    __shared__ uint8_t shared_out[TILE_WIDTH][TILE_WIDTH];
+    __shared__ uint8_t shared_I_low[TILE_WIDTH][TILE_WIDTH];
+    __shared__ uint8_t shared_I_high[TILE_WIDTH][TILE_WIDTH];
+
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int tx = threadIdx.x + 1;
+    int ty = threadIdx.y + 1;
+
+    for (int i = threadIdx.y; i < TILE_WIDTH; i += blockDim.y)
+    {
+        for (int j = threadIdx.x; j < TILE_WIDTH; j += blockDim.x)
+        {
+            int shifted_y = blockIdx.y * blockDim.y + i - 1;
+            int shifted_x = blockIdx.x * blockDim.x + j - 1;
+
+            if (shifted_x >= 0 && shifted_x < width && shifted_y >= 0
+                && shifted_y < height)
+            {
+                shared_out[i][j] = out[shifted_y * width + shifted_x];
+                shared_I_low[i][j] = I_low[shifted_y * width + shifted_x];
+                shared_I_high[i][j] = I_high[shifted_y * width + shifted_x];
+            }
+            else
+            {
+                shared_out[i][j] = 0;
+                shared_I_low[i][j] = 0;
+                shared_I_high[i][j] = 0;
+            }
+        }
+    }
+
+    __shared__ int shared_changed;
+    __shared__ int global_changed;
+
+    if (threadIdx.x == 0 && threadIdx.y == 0)
+        global_changed = 0;
+
+    __syncthreads();
 
     if (x >= width || y >= height)
         return;
 
-    int idx = y * width + x;
-
-    if (out[idx] || !I_low[idx])
-        return;
-
-    if (I_high[idx])
+    do
     {
-        out[idx] = 1;
-        *changed = 1;
-        return;
-    }
+        bool local_changed = false;
 
-    if ((y > 0 && out[idx - width]) || (x > 0 && out[idx - 1])
-        || (y + 1 < height && out[idx + width])
-        || (x + 1 < width && out[idx + 1]))
-    {
-        out[idx] = 1;
-        *changed = 1;
-    }
+        if (!(shared_out[ty][tx] || !shared_I_low[ty][tx]))
+        {
+            if (shared_I_high[ty][tx] || shared_out[ty - 1][tx]
+                || shared_out[ty][tx - 1] || shared_out[ty][tx + 1]
+                || shared_out[ty + 1][tx])
+                local_changed = true;
+        }
+
+        if (threadIdx.x == 0 && threadIdx.y == 0)
+            shared_changed = 0;
+
+        __syncthreads();
+
+        if (local_changed)
+        {
+            shared_out[ty][tx] = 1;
+            shared_changed = 1;
+            global_changed = 1;
+        }
+
+        __syncthreads();
+    } while (shared_changed);
+
+    out[y * width + x] = shared_out[ty][tx];
+
+    if (threadIdx.x == 0 && threadIdx.y == 0 && global_changed)
+        *changed = global_changed;
 }
 
 __global__ void paint_kernel(std::byte* buffer, int width, int height,
