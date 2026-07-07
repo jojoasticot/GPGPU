@@ -33,6 +33,14 @@ struct reservoir
 
 __constant__ uint8_t* logo;
 
+__device__ int pixel_diff(rgb p1, rgb p2)
+{
+  int r = abs(p1.r - p2.r);
+  int g = abs(p1.g - p2.g);
+  int b = abs(p1.b - p2.b);
+  return sqrtf(r*r + g*g + b*b);
+}
+
 /// @brief Black out the red channel from the video and add EPITA's logo
 /// @param buffer
 /// @param width
