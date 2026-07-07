@@ -187,31 +187,47 @@ __global__ void erode_kernel(const int* in, int* out, int width, int height)
 __global__ void dilate_threshold_kernel(const int* in, int width, int height,
                                         uint8_t* I_low, uint8_t* I_high)
 {
+    // TILE_WIDTH = blockDim.x + 2
+    constexpr int TILE_WIDTH = 16 + 2;
+    __shared__ int tile[TILE_WIDTH][TILE_WIDTH];
+
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= width || y >= height)
-    {
         return;
+
+    for (int i = threadIdx.y; i < TILE_WIDTH; i += blockDim.y)
+    {
+        for (int j = threadIdx.x; j < TILE_WIDTH; j += blockDim.x)
+        {
+            // we do that to have padding pixels initialized at 0
+            int shifted_y = blockIdx.y * blockDim.y - 1 + i;
+            int shifted_x = blockIdx.x * blockDim.x - 1 + j;
+
+            if (shifted_y >= 0 && shifted_x >= 0 && shifted_y < height
+                && shifted_x < width)
+                tile[i][j] = in[shifted_y * width + shifted_x];
+            else
+                tile[i][j] = 0;
+        }
     }
 
-    int idx = y * width + x;
-    int max_val = in[idx];
+    __syncthreads();
 
-    if (y - 1 >= 0)
-        max_val = max(max_val, in[idx - width]);
+    // tile[0][0] = 0 (padded pixel)
+    // we have to shift our coordinates according to the tile coordinates
+    int ty = threadIdx.y + 1;
+    int tx = threadIdx.x + 1;
 
-    if (x - 1 >= 0)
-        max_val = max(max_val, in[idx - 1]);
+    int max_val = tile[ty][tx];
+    max_val = max(max_val, tile[ty - 1][tx]);
+    max_val = max(max_val, tile[ty + 1][tx]);
+    max_val = max(max_val, tile[ty][tx - 1]);
+    max_val = max(max_val, tile[ty][tx + 1]);
 
-    if (y + 1 < height)
-        max_val = max(max_val, in[idx + width]);
-
-    if (x + 1 < width)
-        max_val = max(max_val, in[idx + 1]);
-
-    I_low[idx] = max_val > T_LOW;
-    I_high[idx] = max_val > T_LOW;
+    I_low[y * width + x] = max_val > T_LOW;
+    I_high[y * width + x] = max_val > T_HIGH;
 }
 
 __global__ void hysteresis(const uint8_t* I_low, const uint8_t* I_high,
