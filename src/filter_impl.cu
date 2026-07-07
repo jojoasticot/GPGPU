@@ -25,6 +25,12 @@ struct rgb
     uint8_t r, g, b;
 };
 
+struct reservoir
+{
+    struct rgb rgb;
+    float w;
+};
+
 __constant__ uint8_t* logo;
 
 /// @brief Black out the red channel from the video and add EPITA's logo
