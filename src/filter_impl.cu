@@ -3,8 +3,9 @@
 #include <cstdio>
 #include <thread>
 
+#include <curand_kernel.h>
+
 #include "filter_impl.h"
-#include "logo.h"
 
 #define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
 template <typename T>
@@ -36,8 +37,6 @@ struct reservoir
     struct rgb rgb;
     float w;
 };
-
-__constant__ uint8_t* logo;
 
 __device__ int pixel_diff(rgb p1, rgb p2)
 {
@@ -84,20 +83,14 @@ __device__ void update_weight_and_samples(reservoir* rs, int m_idx,
                     + p.b)
         / w;
 
-    rs[m_idx].rgb = { temp_r,
-                      temp_g,
-                      temp_b };
+    rs[m_idx].rgb = { static_cast<uint8_t>(temp_r),
+                      static_cast<uint8_t>(temp_g),
+                      static_cast<uint8_t>(temp_b) };
 }
 
-/// @brief Black out the red channel from the video and add EPITA's logo
-/// @param buffer
-/// @param width
-/// @param height
-/// @param stride
-/// @param pixel_stride
-/// @return
-__global__ void remove_red_channel_inp(std::byte* buffer, int width, int height,
-                                       int stride)
+__global__ void compute_diff_kernel(std::byte* buffer, int width, int height,
+                                     int stride, reservoir* rss,
+                                     int* diff_map, curandState* states)
 {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -105,86 +98,287 @@ __global__ void remove_red_channel_inp(std::byte* buffer, int width, int height,
     if (x >= width || y >= height)
         return;
 
+    int idx = y * width + x;
     rgb* lineptr = (rgb*)(buffer + y * stride);
-    if (y < logo_height && x < logo_width)
+    rgb p = lineptr[x];
+    reservoir* rs = &rss[idx * K];
+
+    int m_idx = find_matching_reservoir(p, rs);
+
+    if (m_idx != -1 && rs[m_idx].w > 0)
+        update_weight_and_samples(rs, m_idx, p);
+    else if (m_idx != -1 && rs[m_idx].w == 0)
     {
-        float alpha = logo[y * logo_width + x] / 255.f;
-        lineptr[x].r = 0;
-        lineptr[x].g = uint8_t(alpha * lineptr[x].g + (1 - alpha) * 255);
-        lineptr[x].b = uint8_t(alpha * lineptr[x].b + (1 - alpha) * 255);
+        rs[m_idx].rgb = p;
+        rs[m_idx].w = 1;
     }
     else
     {
-        lineptr[x].r = 0;
+        m_idx = 0;
+        float total_weight = rs[0].w;
+
+        for (int i = 1; i < K; i++)
+        {
+            if (rs[i].w < rs[m_idx].w)
+                m_idx = i;
+
+            total_weight += rs[i].w;
+        }
+
+        curandState local_state = states[idx];
+        float rand_float = curand_uniform(&local_state);
+        states[idx] = local_state;
+
+        if (rand_float * total_weight >= rs[m_idx].w)
+        {
+            rs[m_idx].rgb = p;
+            rs[m_idx].w = 1;
+        }
+    }
+
+    for (int i = 0; i < K; i++)
+        if (rs[i].w > MAX_WEIGHTS)
+            rs[i].w = MAX_WEIGHTS;
+
+    int max_idx = 0;
+
+    for (int i = 1; i < K; i++)
+        if (rs[max_idx].w <= rs[i].w)
+            max_idx = i;
+
+    diff_map[idx] = pixel_diff(p, rs[max_idx].rgb) / 3;
+}
+
+__global__ void init_curand_kernel(curandState* states, int width,
+                                    int height, unsigned long long seed)
+{
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (x >= width || y >= height)
+        return;
+
+    int idx = y * width + x;
+    curand_init(seed, idx, 0, &states[idx]);
+}
+
+__global__ void erode_kernel(const int *in, int* out, int width,
+                                  int height)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+    {
+      return;
+    }
+
+    int idx = y * width + x;
+    int min_val = in[idx];
+
+    if (y - 1 >= 0)
+        min_val = min(min_val, in[idx - width]);
+
+    if (x - 1 >= 0)
+        min_val = min(min_val, in[idx - 1]);
+
+    if (y + 1 < height)
+        min_val = min(min_val, in[idx + width]);
+
+    if (x + 1 < width)
+        min_val = min(min_val, in[idx + 1]);
+
+    out[idx] = min_val;
+}
+
+__global__ void dilate_kernel(const int *in, int *out, int width,
+                                      int height)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height)
+    {
+      return;
+    }
+
+    int idx = y * width + x;
+    int max_val = in[idx];
+
+    if (y - 1 >= 0)
+        max_val = max(max_val, in[idx - width]);
+
+    if (x - 1 >= 0)
+        max_val = max(max_val, in[idx - 1]);
+
+    if (y + 1 < height)
+        max_val = max(max_val, in[idx + width]);
+
+    if (x + 1 < width)
+        max_val = max(max_val, in[idx + 1]);
+
+    out[idx] = max_val;
+}
+
+__global__ void threshold_kernel(const int* opened, uint8_t* I_low,
+                                     uint8_t* I_high, int width, int height)
+{
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (x >= width || y >= height)
+        return;
+
+    int idx = y * width + x;
+    I_low[idx] = opened[idx] > T_LOW;
+    I_high[idx] = opened[idx] > T_HIGH;
+}
+
+__global__ void hysteresis(const uint8_t* I_low, const uint8_t* I_high, uint8_t* out, int width,
+                                    int height, int* changed)
+{
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (x >= width || y >= height)
+        return;
+
+    int idx = y * width + x;
+
+    if (out[idx] || !I_low[idx])
+        return;
+
+    if (I_high[idx])
+    {
+        out[idx] = 1;
+        atomicExch(changed, 1);
+        return;
+    }
+
+    if ((y > 0 && out[idx - width]) || (x > 0 && out[idx - 1])
+        || (y + 1 < height && out[idx + width])
+        || (x + 1 < width && out[idx + 1]))
+    {
+        out[idx] = 1;
+        atomicExch(changed, 1);
     }
 }
 
-namespace
-{
-    void load_logo()
+__global__ void paint_kernel(std::byte* buffer, int width, int height,
+                                 int stride, const uint8_t* mask)
     {
-        static auto buffer =
-            std::unique_ptr<std::byte, decltype(&cudaFree)>{ nullptr,
-                                                             &cudaFree };
+        int y = blockIdx.y * blockDim.y + threadIdx.y;
+        int x = blockIdx.x * blockDim.x + threadIdx.x;
 
-        if (buffer == nullptr)
+        if (x >= width || y >= height)
+            return;
+
+        if (mask[y * width + x])
         {
-            cudaError_t err;
-            std::byte* ptr;
-            err = cudaMalloc(&ptr, logo_width * logo_height);
-            CHECK_CUDA_ERROR(err);
-
-            err = cudaMemcpy(ptr, logo_data, logo_width * logo_height,
-                             cudaMemcpyHostToDevice);
-            CHECK_CUDA_ERROR(err);
-
-            err = cudaMemcpyToSymbol(logo, &ptr, sizeof(ptr));
-            CHECK_CUDA_ERROR(err);
-
-            buffer.reset(ptr);
+            rgb* lineptr = (rgb*)(buffer + y * stride);
+            lineptr[x].r = 255;
         }
     }
-} // namespace
+
 
 extern "C"
 {
     void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride,
                      int pixel_stride)
     {
-        load_logo();
-
         assert(sizeof(rgb) == pixel_stride);
-        std::byte* dBuffer;
-        size_t pitch;
-
         cudaError_t err;
 
-        err = cudaMallocPitch(&dBuffer, &pitch, width * sizeof(rgb), height);
-        CHECK_CUDA_ERROR(err);
-
-        err = cudaMemcpy2D(dBuffer, pitch, src_buffer, src_stride,
-                           width * sizeof(rgb), height, cudaMemcpyDefault);
-        CHECK_CUDA_ERROR(err);
+        static std::byte* dBuffer = nullptr;
+        static size_t dPitch = 0;
+        static reservoir* rss = nullptr;
+        static curandState* rand_states = nullptr;
+        static int* diff_map = nullptr;
+        static int* tmp = nullptr;
+        static uint8_t* I_low = nullptr;
+        static uint8_t* I_high = nullptr;
+        static uint8_t* mask = nullptr;
+        static int* changed = nullptr;
 
         dim3 blockSize(16, 16);
         dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x,
                       (height + (blockSize.y - 1)) / blockSize.y);
 
-        remove_red_channel_inp<<<gridSize, blockSize>>>(dBuffer, width, height,
-                                                        pitch);
+        if (rss == nullptr)
+        {
+            err = cudaMallocPitch(&dBuffer, &dPitch, width * sizeof(rgb), height);
+            CHECK_CUDA_ERROR(err);
 
-        err = cudaMemcpy2D(src_buffer, src_stride, dBuffer, pitch,
+            err = cudaMalloc(&rss, width * height * K * sizeof(reservoir));
+            CHECK_CUDA_ERROR(err);
+            err = cudaMemset(rss, 0, width * height * K * sizeof(reservoir));
+            CHECK_CUDA_ERROR(err);
+
+            err = cudaMalloc(&rand_states, width * height * sizeof(curandState));
+            CHECK_CUDA_ERROR(err);
+            init_curand_kernel<<<gridSize, blockSize>>>(rand_states, width,
+                                                        height, 1234ULL);
+            CHECK_CUDA_ERROR(cudaGetLastError());
+
+            err = cudaMalloc(&diff_map, width * height * sizeof(int));
+            CHECK_CUDA_ERROR(err);
+            err = cudaMalloc(&tmp, width * height * sizeof(int));
+            CHECK_CUDA_ERROR(err);
+
+            err = cudaMalloc(&I_low, width * height * sizeof(uint8_t));
+            CHECK_CUDA_ERROR(err);
+            err = cudaMalloc(&I_high, width * height * sizeof(uint8_t));
+            CHECK_CUDA_ERROR(err);
+            err = cudaMalloc(&mask, width * height * sizeof(uint8_t));
+            CHECK_CUDA_ERROR(err);
+
+            err = cudaMalloc(&changed, sizeof(int));
+            CHECK_CUDA_ERROR(err);
+        }
+
+        err = cudaMemcpy2D(dBuffer, dPitch, src_buffer, src_stride,
                            width * sizeof(rgb), height, cudaMemcpyDefault);
         CHECK_CUDA_ERROR(err);
 
-        cudaFree(dBuffer);
+        compute_diff_kernel<<<gridSize, blockSize>>>(
+            dBuffer, width, height, static_cast<int>(dPitch), rss, diff_map,
+            rand_states);
+        CHECK_CUDA_ERROR(cudaGetLastError());
 
-        err = cudaDeviceSynchronize();
+        erode_kernel<<<gridSize, blockSize>>>(diff_map, tmp, width, height);
+        CHECK_CUDA_ERROR(cudaGetLastError());
+
+        dilate_kernel<<<gridSize, blockSize>>>(tmp, diff_map, width, height);
+        CHECK_CUDA_ERROR(cudaGetLastError());
+
+        threshold_kernel<<<gridSize, blockSize>>>(diff_map, I_low, I_high,
+                                                  width, height);
+        CHECK_CUDA_ERROR(cudaGetLastError());
+
+        err = cudaMemset(mask, 0, width * height * sizeof(uint8_t));
         CHECK_CUDA_ERROR(err);
 
+        int host_changed = 1;
+        while (host_changed)
         {
-            using namespace std::chrono_literals;
-            // std::this_thread::sleep_for(100ms);
+            err = cudaMemset(changed, 0, sizeof(int));
+            CHECK_CUDA_ERROR(err);
+
+            hysteresis<<<gridSize, blockSize>>>(I_low, I_high, mask, width,
+                                                height, changed);
+            CHECK_CUDA_ERROR(cudaGetLastError());
+
+            err = cudaMemcpy(&host_changed, changed, sizeof(int),
+                             cudaMemcpyDeviceToHost);
+            CHECK_CUDA_ERROR(err);
         }
+
+        paint_kernel<<<gridSize, blockSize>>>(dBuffer, width, height,
+                                              static_cast<int>(dPitch), mask);
+        CHECK_CUDA_ERROR(cudaGetLastError());
+
+        err = cudaMemcpy2D(src_buffer, src_stride, dBuffer, dPitch,
+                           width * sizeof(rgb), height, cudaMemcpyDefault);
+        CHECK_CUDA_ERROR(err);
     }
 }
