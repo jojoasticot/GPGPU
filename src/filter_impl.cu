@@ -45,19 +45,23 @@ __device__ int pixel_diff(rgb p1, rgb p2)
     return sqrtf(r * r + g * g + b * b);
 }
 
-__device__ int find_matching_reservoir(rgb p, reservoir* rs)
+__device__ int find_matching_reservoir(rgb p, rgb* colors, float* weights,
+                                       int num_pixels, int idx)
 {
     int m_idx = -1;
 
     for (int i = 0; i < K; i++)
     {
-        if (rs[i].w > 0)
+        int rss_idx = i * num_pixels + idx;
+        if (weights[rss_idx] > 0)
         {
-            if (abs(static_cast<int>(p.r) - static_cast<int>(rs[i].rgb.r))
+            if (abs(static_cast<int>(p.r) - static_cast<int>(colors[rss_idx].r))
                     < RGB_DIFF_THRESHOLD
-                && abs(static_cast<int>(p.g) - static_cast<int>(rs[i].rgb.g))
+                && abs(static_cast<int>(p.g)
+                       - static_cast<int>(colors[rss_idx].g))
                     < RGB_DIFF_THRESHOLD
-                && abs(static_cast<int>(p.b) - static_cast<int>(rs[i].rgb.b))
+                && abs(static_cast<int>(p.b)
+                       - static_cast<int>(colors[rss_idx].b))
                     < RGB_DIFF_THRESHOLD)
                 return i;
         }
@@ -68,22 +72,25 @@ __device__ int find_matching_reservoir(rgb p, reservoir* rs)
     return m_idx;
 }
 
-__device__ void update_weight_and_samples(reservoir* rs, int m_idx, rgb p)
+__device__ void update_weight_and_samples(rgb* colors, float* weights,
+                                          int m_idx, rgb p, int num_pixels,
+                                          int idx)
 {
-    rs[m_idx].w++;
-    float w = rs[m_idx].w;
+    int rss_idx = m_idx * num_pixels + idx;
+    weights[rss_idx]++;
+    float w = weights[rss_idx];
 
-    float temp_r = ((w - 1) * rs[m_idx].rgb.r + p.r) / w;
-    float temp_g = ((w - 1) * rs[m_idx].rgb.g + p.g) / w;
-    float temp_b = ((w - 1) * rs[m_idx].rgb.b + p.b) / w;
+    float temp_r = ((w - 1) * colors[rss_idx].r + p.r) / w;
+    float temp_g = ((w - 1) * colors[rss_idx].g + p.g) / w;
+    float temp_b = ((w - 1) * colors[rss_idx].b + p.b) / w;
 
-    rs[m_idx].rgb = { static_cast<uint8_t>(temp_r),
-                      static_cast<uint8_t>(temp_g),
-                      static_cast<uint8_t>(temp_b) };
+    colors[rss_idx] = { static_cast<uint8_t>(temp_r),
+                        static_cast<uint8_t>(temp_g),
+                        static_cast<uint8_t>(temp_b) };
 }
 
 __global__ void compute_diff_kernel(std::byte* buffer, int width, int height,
-                                    size_t stride, reservoir* rss,
+                                    size_t stride, rgb* colors, float* weights,
                                     int* diff_map, curandState* states)
 {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -95,52 +102,57 @@ __global__ void compute_diff_kernel(std::byte* buffer, int width, int height,
     int idx = y * width + x;
     rgb* lineptr = (rgb*)(buffer + y * stride);
     rgb p = lineptr[x];
-    reservoir* rs = &rss[idx * K];
+    int num_pixels = width * height;
 
-    int m_idx = find_matching_reservoir(p, rs);
+    // we access rss[rs_i * num_pixels + idx] to have coalesced access across
+    // threads
 
-    if (m_idx != -1 && rs[m_idx].w > 0)
-        update_weight_and_samples(rs, m_idx, p);
-    else if (m_idx != -1 && rs[m_idx].w == 0)
+    int m_idx = find_matching_reservoir(p, colors, weights, num_pixels, idx);
+
+    if (m_idx != -1 && weights[m_idx * num_pixels + idx] > 0)
+        update_weight_and_samples(colors, weights, m_idx, p, num_pixels, idx);
+    else if (m_idx != -1 && weights[m_idx * num_pixels + idx] == 0)
     {
-        rs[m_idx].rgb = p;
-        rs[m_idx].w = 1;
+        colors[m_idx * num_pixels + idx] = p;
+        weights[m_idx * num_pixels + idx] = 1;
     }
     else
     {
         m_idx = 0;
-        float total_weight = rs[0].w;
+        float total_weight = weights[0 * num_pixels + idx];
 
         for (int i = 1; i < K; i++)
         {
-            if (rs[i].w < rs[m_idx].w)
+            if (weights[i * num_pixels + idx]
+                < weights[m_idx * num_pixels + idx])
                 m_idx = i;
 
-            total_weight += rs[i].w;
+            total_weight += weights[i * num_pixels + idx];
         }
 
         curandState local_state = states[idx];
         float rand_float = curand_uniform(&local_state);
         states[idx] = local_state;
 
-        if (rand_float * total_weight >= rs[m_idx].w)
+        if (rand_float * total_weight >= weights[m_idx * num_pixels + idx])
         {
-            rs[m_idx].rgb = p;
-            rs[m_idx].w = 1;
+            colors[m_idx * num_pixels + idx] = p;
+            weights[m_idx * num_pixels + idx] = 1;
         }
     }
 
     for (int i = 0; i < K; i++)
-        if (rs[i].w > MAX_WEIGHTS)
-            rs[i].w = MAX_WEIGHTS;
+        if (weights[i * num_pixels + idx] > MAX_WEIGHTS)
+            weights[i * num_pixels + idx] = MAX_WEIGHTS;
 
     int max_idx = 0;
 
     for (int i = 1; i < K; i++)
-        if (rs[max_idx].w <= rs[i].w)
+        if (weights[max_idx * num_pixels + idx]
+            <= weights[i * num_pixels + idx])
             max_idx = i;
 
-    diff_map[idx] = pixel_diff(p, rs[max_idx].rgb) / 3;
+    diff_map[idx] = pixel_diff(p, colors[max_idx * num_pixels + idx]) / 3;
 }
 
 __global__ void init_curand_kernel(curandState* states, int width, int height,
@@ -184,76 +196,131 @@ __global__ void erode_kernel(const int* in, int* out, int width, int height)
     out[idx] = min_val;
 }
 
-__global__ void dilate_kernel(const int* in, int* out, int width, int height)
+__global__ void dilate_threshold_kernel(const int* in, int width, int height,
+                                        uint8_t* I_low, uint8_t* I_high)
 {
+    // TILE_WIDTH = blockDim.x + 2
+    constexpr int TILE_WIDTH = 16 + 2;
+    __shared__ int tile[TILE_WIDTH][TILE_WIDTH];
+
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x >= width || y >= height)
-    {
         return;
+
+    for (int i = threadIdx.y; i < TILE_WIDTH; i += blockDim.y)
+    {
+        for (int j = threadIdx.x; j < TILE_WIDTH; j += blockDim.x)
+        {
+            // we do that to have padding pixels initialized at 0
+            int shifted_y = blockIdx.y * blockDim.y - 1 + i;
+            int shifted_x = blockIdx.x * blockDim.x - 1 + j;
+
+            if (shifted_y >= 0 && shifted_x >= 0 && shifted_y < height
+                && shifted_x < width)
+                tile[i][j] = in[shifted_y * width + shifted_x];
+            else
+                tile[i][j] = 0;
+        }
     }
 
-    int idx = y * width + x;
-    int max_val = in[idx];
+    __syncthreads();
 
-    if (y - 1 >= 0)
-        max_val = max(max_val, in[idx - width]);
+    // tile[0][0] = 0 (padded pixel)
+    // we have to shift our coordinates according to the tile coordinates
+    int ty = threadIdx.y + 1;
+    int tx = threadIdx.x + 1;
 
-    if (x - 1 >= 0)
-        max_val = max(max_val, in[idx - 1]);
+    int max_val = tile[ty][tx];
+    max_val = max(max_val, tile[ty - 1][tx]);
+    max_val = max(max_val, tile[ty + 1][tx]);
+    max_val = max(max_val, tile[ty][tx - 1]);
+    max_val = max(max_val, tile[ty][tx + 1]);
 
-    if (y + 1 < height)
-        max_val = max(max_val, in[idx + width]);
-
-    if (x + 1 < width)
-        max_val = max(max_val, in[idx + 1]);
-
-    out[idx] = max_val;
-}
-
-__global__ void threshold_kernel(const int* opened, uint8_t* I_low,
-                                 uint8_t* I_high, int width, int height)
-{
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (x >= width || y >= height)
-        return;
-
-    int idx = y * width + x;
-    I_low[idx] = opened[idx] > T_LOW;
-    I_high[idx] = opened[idx] > T_HIGH;
+    I_low[y * width + x] = max_val > T_LOW;
+    I_high[y * width + x] = max_val > T_HIGH;
 }
 
 __global__ void hysteresis(const uint8_t* I_low, const uint8_t* I_high,
                            uint8_t* out, int width, int height, int* changed)
 {
+    constexpr int TILE_WIDTH = 16 + 2;
+    __shared__ uint8_t shared_out[TILE_WIDTH][TILE_WIDTH];
+    __shared__ uint8_t shared_I_low[TILE_WIDTH][TILE_WIDTH];
+    __shared__ uint8_t shared_I_high[TILE_WIDTH][TILE_WIDTH];
+
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int tx = threadIdx.x + 1;
+    int ty = threadIdx.y + 1;
+
+    for (int i = threadIdx.y; i < TILE_WIDTH; i += blockDim.y)
+    {
+        for (int j = threadIdx.x; j < TILE_WIDTH; j += blockDim.x)
+        {
+            int shifted_y = blockIdx.y * blockDim.y + i - 1;
+            int shifted_x = blockIdx.x * blockDim.x + j - 1;
+
+            if (shifted_x >= 0 && shifted_x < width && shifted_y >= 0
+                && shifted_y < height)
+            {
+                shared_out[i][j] = out[shifted_y * width + shifted_x];
+                shared_I_low[i][j] = I_low[shifted_y * width + shifted_x];
+                shared_I_high[i][j] = I_high[shifted_y * width + shifted_x];
+            }
+            else
+            {
+                shared_out[i][j] = 0;
+                shared_I_low[i][j] = 0;
+                shared_I_high[i][j] = 0;
+            }
+        }
+    }
+
+    __shared__ int shared_changed;
+    __shared__ int global_changed;
+
+    if (threadIdx.x == 0 && threadIdx.y == 0)
+        global_changed = 0;
+
+    __syncthreads();
 
     if (x >= width || y >= height)
         return;
 
-    int idx = y * width + x;
-
-    if (out[idx] || !I_low[idx])
-        return;
-
-    if (I_high[idx])
+    do
     {
-        out[idx] = 1;
-        *changed = 1;
-        return;
-    }
+        bool local_changed = false;
 
-    if ((y > 0 && out[idx - width]) || (x > 0 && out[idx - 1])
-        || (y + 1 < height && out[idx + width])
-        || (x + 1 < width && out[idx + 1]))
-    {
-        out[idx] = 1;
-        *changed = 1;
-    }
+        if (!(shared_out[ty][tx] || !shared_I_low[ty][tx]))
+        {
+            if (shared_I_high[ty][tx] || shared_out[ty - 1][tx]
+                || shared_out[ty][tx - 1] || shared_out[ty][tx + 1]
+                || shared_out[ty + 1][tx])
+                local_changed = true;
+        }
+
+        if (threadIdx.x == 0 && threadIdx.y == 0)
+            shared_changed = 0;
+
+        __syncthreads();
+
+        if (local_changed)
+        {
+            shared_out[ty][tx] = 1;
+            shared_changed = 1;
+            global_changed = 1;
+        }
+
+        __syncthreads();
+    } while (shared_changed);
+
+    out[y * width + x] = shared_out[ty][tx];
+
+    if (threadIdx.x == 0 && threadIdx.y == 0 && global_changed)
+        *changed = global_changed;
 }
 
 __global__ void paint_kernel(std::byte* buffer, int width, int height,
@@ -282,7 +349,8 @@ extern "C"
 
         static std::byte* dBuffer = nullptr;
         static size_t dPitch = 0;
-        static reservoir* rss = nullptr;
+        static rgb* colors = nullptr;
+        static float* weights = nullptr;
         static curandState* rand_states = nullptr;
         static int* diff_map = nullptr;
         static int* eroded_diff_map = nullptr;
@@ -301,15 +369,20 @@ extern "C"
         // when we are in the last frame. the process will free it
         // automatically anyway
 
-        if (rss == nullptr)
+        if (colors == nullptr)
         {
             err =
                 cudaMallocPitch(&dBuffer, &dPitch, width * sizeof(rgb), height);
             CHECK_CUDA_ERROR(err);
 
-            err = cudaMalloc(&rss, width * height * K * sizeof(reservoir));
+            err = cudaMalloc(&colors, width * height * K * sizeof(rgb));
             CHECK_CUDA_ERROR(err);
-            err = cudaMemset(rss, 0, width * height * K * sizeof(reservoir));
+            err = cudaMemset(colors, 0, width * height * K * sizeof(rgb));
+            CHECK_CUDA_ERROR(err);
+
+            err = cudaMalloc(&weights, width * height * K * sizeof(float));
+            CHECK_CUDA_ERROR(err);
+            err = cudaMemset(weights, 0, width * height * K * sizeof(float));
             CHECK_CUDA_ERROR(err);
 
             err =
@@ -339,8 +412,9 @@ extern "C"
                            width * sizeof(rgb), height, cudaMemcpyDefault);
         CHECK_CUDA_ERROR(err);
 
-        compute_diff_kernel<<<gridSize, blockSize>>>(
-            dBuffer, width, height, dPitch, rss, diff_map, rand_states);
+        compute_diff_kernel<<<gridSize, blockSize>>>(dBuffer, width, height,
+                                                     dPitch, colors, weights,
+                                                     diff_map, rand_states);
         CHECK_CUDA_ERROR(cudaGetLastError());
 
         erode_kernel<<<gridSize, blockSize>>>(diff_map, eroded_diff_map, width,
@@ -348,12 +422,9 @@ extern "C"
         CHECK_CUDA_ERROR(cudaGetLastError());
 
         // dilate on eroded diff_map -> opening of diff_map
-        dilate_kernel<<<gridSize, blockSize>>>(eroded_diff_map, diff_map, width,
-                                               height);
-        CHECK_CUDA_ERROR(cudaGetLastError());
-
-        threshold_kernel<<<gridSize, blockSize>>>(diff_map, I_low, I_high,
-                                                  width, height);
+        // compute thresholds directly
+        dilate_threshold_kernel<<<gridSize, blockSize>>>(eroded_diff_map, width,
+                                                         height, I_low, I_high);
         CHECK_CUDA_ERROR(cudaGetLastError());
 
         err = cudaMemset(mask, 0, width * height * sizeof(uint8_t));
